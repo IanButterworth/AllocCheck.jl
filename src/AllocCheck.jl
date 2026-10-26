@@ -14,6 +14,18 @@ include("utils.jl")
 
 module Runtime end
 
+# A `try` block's setjmp result is only tested against zero. Julia 1.14 also emits a setjmp
+# for compute cancellation, whose result is tested against other values; it is not a catch.
+function is_catch_setjmp(inst::LLVM.CallInst)
+    users = collect(inst.users)
+    length(users) == 1 || return false
+    icmp_ = only(users)
+    icmp_ isa LLVM.ICmpInst || return false
+    rhs = icmp_.operands[2]
+    rhs isa LLVM.ConstantInt && convert(Int, rhs) == 0 || return false
+    return all(br_ -> br_ isa LLVM.BrInst, icmp_.users)
+end
+
 function rename_calls_and_throws!(f::LLVM.Function, mod::LLVM.Module)
 
     # In order to detect whether an instruction executes only when
@@ -48,10 +60,9 @@ function rename_calls_and_throws!(f::LLVM.Function, mod::LLVM.Module)
                     end
 
                     # `catch`: Add pseudo-edge from any_catch
-                    if decl.name == "__sigsetjmp" || decl.name == "sigsetjmp"
-                        icmp_ = only(inst.users) # Asserts one usage
-                        @assert icmp_ isa LLVM.ICmpInst
-                        @assert convert(Int, icmp_.operands[2]) == 0
+                    if (decl.name == "__sigsetjmp" || decl.name == "sigsetjmp") &&
+                       is_catch_setjmp(inst)
+                        icmp_ = only(inst.users)
                         for br_ in icmp_.users
                             @assert br_ isa LLVM.BrInst
 
